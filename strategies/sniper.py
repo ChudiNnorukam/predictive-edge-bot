@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any
 
 from strategies.base_strategy import BaseStrategy
 from executor import OrderRequest
+from config import GAMMA_API, CLOB_WS
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ class SniperStrategy(BaseStrategy):
 
     async def _connect_websocket(self):
         """Connect to CLOB WebSocket and stream prices"""
-        ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+        ws_url = f"{CLOB_WS}market"
 
         subscribe_msg = {
             "type": "subscribe",
@@ -95,7 +96,11 @@ class SniperStrategy(BaseStrategy):
                     try:
                         await ws.ping()
                         await asyncio.sleep(10)
-                    except:
+                    except asyncio.CancelledError:
+                        logger.debug(f"{self.name} heartbeat cancelled")
+                        break
+                    except Exception as e:
+                        logger.error(f"{self.name} heartbeat failed: {e}")
                         break
 
             heartbeat_task = asyncio.create_task(heartbeat())
@@ -206,7 +211,7 @@ class SniperStrategy(BaseStrategy):
     async def _fetch_market_info(self, token_id: str):
         """Fetch market information for a token"""
         async with aiohttp.ClientSession() as session:
-            url = "https://gamma-api.polymarket.com/markets"
+            url = f"{GAMMA_API}/markets"
             params = {"clob_token_ids": token_id}
 
             try:

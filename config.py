@@ -87,11 +87,11 @@ def load_config() -> Config:
     )
 
 
-# API Endpoints
-CLOB_HOST = "https://clob.polymarket.com"
-CLOB_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/"
-GAMMA_API = "https://gamma-api.polymarket.com"
-DATA_API = "https://data-api.polymarket.com"
+# API Endpoints (configurable via environment variables)
+CLOB_HOST = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
+CLOB_WS = os.getenv("CLOB_WS", "wss://ws-subscriptions-clob.polymarket.com/ws/")
+GAMMA_API = os.getenv("GAMMA_API", "https://gamma-api.polymarket.com")
+DATA_API = os.getenv("DATA_API", "https://data-api.polymarket.com")
 
 # Contract Addresses (Polygon Mainnet)
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"

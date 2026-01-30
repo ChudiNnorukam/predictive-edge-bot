@@ -74,9 +74,10 @@ async def test_position_store():
     try:
         store = PositionStore(db_path=db_path, redis_url=None)
 
-        # Test recording a trade
+        # Test recording a trade (use valid token_id format)
+        test_token = "0x1234567890abcdef1234567890abcdef12345678"
         trade_id = await store.record_trade(
-            token_id="test_token_123",
+            token_id=test_token,
             side="YES",
             action="BUY",
             price=0.65,
@@ -88,7 +89,7 @@ async def test_position_store():
         print(f"✓ Recorded trade ID: {trade_id}")
 
         # Test getting position
-        position = await store.get_position("test_token_123")
+        position = await store.get_position(test_token)
         assert position is not None, "Position should exist"
         assert position["entry_price"] == 0.65, "Entry price should match"
         print(f"✓ Retrieved position: {position['token_id']}")
@@ -134,9 +135,9 @@ async def test_executor():
         store = PositionStore(db_path=db_path, redis_url=None)
         executor = OrderExecutor(config, store)
 
-        # Test order execution
+        # Test order execution (use valid token_id - minimum 10 chars)
         request = OrderRequest(
-            token_id="test_token_456",
+            token_id="0x1234567890abcdef1234567890abcdef12345678",
             side="YES",
             action="BUY",
             size=5.0,
@@ -151,7 +152,7 @@ async def test_executor():
         # Test concurrent deduplication (submit same order while first is pending)
         # Create tasks that will run concurrently
         request2 = OrderRequest(
-            token_id="test_token_456",
+            token_id="0xabcdef1234567890abcdef1234567890abcdef12",
             side="YES",
             action="BUY",
             size=5.0,

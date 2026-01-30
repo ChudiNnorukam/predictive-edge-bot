@@ -14,6 +14,7 @@ from typing import Dict, Any, List
 
 from strategies.base_strategy import BaseStrategy
 from executor import OrderRequest
+from config import DATA_API
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,7 @@ class CopyTraderStrategy(BaseStrategy):
         """Fetch positions for a wallet from Polymarket API"""
         positions = {}
         async with aiohttp.ClientSession() as session:
-            url = "https://data-api.polymarket.com/positions"
+            url = f"{DATA_API}/positions"
             params = {"user": address}
 
             try:
