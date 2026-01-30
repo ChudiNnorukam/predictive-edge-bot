@@ -16,6 +16,8 @@ import asyncio
 import tempfile
 from pathlib import Path
 
+import pytest
+
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -47,8 +49,8 @@ def create_test_config():
     )
 
 
-class TestStrategy(BaseStrategy):
-    """Mock strategy for testing"""
+class MockStrategy(BaseStrategy):
+    """Mock strategy for testing (renamed to avoid pytest collection)"""
 
     async def run(self):
         """Simple run loop"""
@@ -56,13 +58,14 @@ class TestStrategy(BaseStrategy):
         self.trades_executed = 3
         self.total_profit = 10.5
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)  # Reduced sleep for faster tests
 
     async def cleanup(self):
         """No cleanup needed"""
         pass
 
 
+@pytest.mark.asyncio
 async def test_position_store():
     """Test PositionStore database operations"""
     print("\n=== Testing PositionStore ===")
@@ -82,11 +85,12 @@ async def test_position_store():
             action="BUY",
             price=0.65,
             size=10.0,
-            strategy="TestStrategy",
+            strategy="MockStrategy",
             status="executed",
         )
 
         print(f"✓ Recorded trade ID: {trade_id}")
+        assert trade_id is not None, "Trade ID should be returned"
 
         # Test getting position
         position = await store.get_position(test_token)
@@ -107,22 +111,22 @@ async def test_position_store():
         # Test stats
         stats = await store.get_stats()
         print(f"✓ Stats: {stats}")
+        assert stats["total_trades"] >= 1, "Should have at least 1 trade in stats"
 
         print("✓ PositionStore tests passed!")
-        return True
-
-    except Exception as e:
-        print(f"✗ PositionStore test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
     finally:
         # Cleanup
         if os.path.exists(db_path):
             os.unlink(db_path)
+        # Also clean up WAL files
+        for suffix in ["-wal", "-shm"]:
+            wal_path = db_path + suffix
+            if os.path.exists(wal_path):
+                os.unlink(wal_path)
 
 
+@pytest.mark.asyncio
 async def test_executor():
     """Test OrderExecutor"""
     print("\n=== Testing OrderExecutor ===")
@@ -141,7 +145,7 @@ async def test_executor():
             side="YES",
             action="BUY",
             size=5.0,
-            strategy="TestStrategy",
+            strategy="MockStrategy",
             price=0.70,
         )
 
@@ -156,7 +160,7 @@ async def test_executor():
             side="YES",
             action="BUY",
             size=5.0,
-            strategy="TestStrategy",
+            strategy="MockStrategy",
             price=0.70,
         )
 
@@ -176,58 +180,50 @@ async def test_executor():
         print(f"✓ Executor metrics: {metrics}")
 
         print("✓ OrderExecutor tests passed!")
-        return True
-
-    except Exception as e:
-        print(f"✗ OrderExecutor test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
     finally:
         if os.path.exists(db_path):
             os.unlink(db_path)
+        # Also clean up WAL files
+        for suffix in ["-wal", "-shm"]:
+            wal_path = db_path + suffix
+            if os.path.exists(wal_path):
+                os.unlink(wal_path)
 
 
+@pytest.mark.asyncio
 async def test_base_strategy():
     """Test BaseStrategy abstract class"""
     print("\n=== Testing BaseStrategy ===")
 
-    try:
-        config = create_test_config()
-        strategy = TestStrategy(config, name="TestStrategy")
+    config = create_test_config()
+    strategy = MockStrategy(config, name="MockStrategy")
 
-        # Test initialization
-        assert strategy.name == "TestStrategy", "Name should match"
-        assert not strategy.running, "Should start as not running"
-        print("✓ Strategy initialized")
+    # Test initialization
+    assert strategy.name == "MockStrategy", "Name should match"
+    assert not strategy.running, "Should start as not running"
+    print("✓ Strategy initialized")
 
-        # Test start/stop
-        strategy.start()
-        assert strategy.running, "Should be running after start"
-        print("✓ Strategy started")
+    # Test start/stop
+    strategy.start()
+    assert strategy.running, "Should be running after start"
+    print("✓ Strategy started")
 
-        strategy.stop()
-        assert not strategy.running, "Should not be running after stop"
-        print("✓ Strategy stopped")
+    strategy.stop()
+    assert not strategy.running, "Should not be running after stop"
+    print("✓ Strategy stopped")
 
-        # Test metrics
-        await strategy.run()
-        metrics = strategy.get_metrics()
-        assert metrics["signals_detected"] == 5, "Should track signals"
-        assert metrics["trades_executed"] == 3, "Should track trades"
-        print(f"✓ Metrics: {metrics}")
+    # Test metrics
+    await strategy.run()
+    metrics = strategy.get_metrics()
+    assert metrics["signals_detected"] == 5, "Should track signals"
+    assert metrics["trades_executed"] == 3, "Should track trades"
+    print(f"✓ Metrics: {metrics}")
 
-        print("✓ BaseStrategy tests passed!")
-        return True
-
-    except Exception as e:
-        print(f"✗ BaseStrategy test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    print("✓ BaseStrategy tests passed!")
 
 
+# Allow running directly with asyncio.run for debugging
 async def main():
     """Run all tests"""
     print("=" * 70)
@@ -237,9 +233,32 @@ async def main():
     results = []
 
     # Run tests
-    results.append(await test_position_store())
-    results.append(await test_executor())
-    results.append(await test_base_strategy())
+    try:
+        await test_position_store()
+        results.append(True)
+    except Exception as e:
+        print(f"✗ PositionStore test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        results.append(False)
+
+    try:
+        await test_executor()
+        results.append(True)
+    except Exception as e:
+        print(f"✗ OrderExecutor test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        results.append(False)
+
+    try:
+        await test_base_strategy()
+        results.append(True)
+    except Exception as e:
+        print(f"✗ BaseStrategy test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        results.append(False)
 
     # Summary
     print("\n" + "=" * 70)
