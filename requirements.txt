@@ -2,8 +2,9 @@
 # Install: pip install -r requirements.txt
 
 # Core Polymarket
-py-clob-client==0.34.5
-web3>=7.0.0
+py-clob-client>=0.34.5
+web3>=6.0.0,<7.0.0  # PINNED: py-clob-client has issues with web3 7.x
+eth-account>=0.13.0  # Required by py-clob-client
 
 # Async & Networking
 aiohttp>=3.9.0

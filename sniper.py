@@ -15,6 +15,8 @@ import json
 import signal
 import sys
 import logging
+import os
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any
 import argparse
@@ -22,7 +24,7 @@ import argparse
 import aiohttp
 import websockets
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType, ApiCreds
+from py_clob_client.clob_types import MarketOrderArgs, OrderType, ApiCreds, PartialCreateOrderOptions
 from py_clob_client.order_builder.constants import BUY
 
 from config import load_config, CLOB_HOST, CLOB_WS, GAMMA_API, LOG_FORMAT, LOG_DATE_FORMAT
@@ -55,17 +57,47 @@ class SniperBot:
         self.total_profit = 0.0
         self.signals_detected = 0
 
+        # WebSocket health monitoring (handles silent disconnects)
+        self.last_data_received = time.time()
+        self.data_timeout_seconds = 60  # Reconnect if no data for 60s
+
+        # Negative risk market detection (crypto 15-min markets are usually neg risk)
+        self.is_neg_risk = False
+        self.neg_risk_checked = False
+
         self.client = self._init_client()
 
     def _init_client(self) -> ClobClient:
-        """Initialize the Polymarket CLOB client"""
-        client = ClobClient(
-            host=CLOB_HOST,
-            key=self.config.private_key,
-            chain_id=self.config.chain_id,
-            signature_type=1,
-            funder=self.config.wallet_address,
-        )
+        """Initialize the Polymarket CLOB client
+
+        Signature types:
+        - 0: Standard EOA wallet (MetaMask exported key, no proxy)
+        - 1: Email/Magic wallet (Polymarket proxy)
+        - 2: Browser wallet proxy (MetaMask via Polymarket UI)
+
+        Set SIGNATURE_TYPE env var to override (default: 2 for browser wallet proxy)
+        """
+        sig_type = int(os.getenv("SIGNATURE_TYPE", "2"))
+
+        # For signature_type 0 (pure EOA), don't use funder
+        if sig_type == 0:
+            client = ClobClient(
+                host=CLOB_HOST,
+                key=self.config.private_key,
+                chain_id=self.config.chain_id,
+                signature_type=0,
+            )
+            logger.info(f"Client initialized with signature_type=0 (EOA wallet)")
+        else:
+            # For signature_type 1 or 2, use funder (proxy address)
+            client = ClobClient(
+                host=CLOB_HOST,
+                key=self.config.private_key,
+                chain_id=self.config.chain_id,
+                signature_type=sig_type,
+                funder=self.config.wallet_address,
+            )
+            logger.info(f"Client initialized with signature_type={sig_type} (proxy wallet)")
 
         if self.config.clob_api_key and self.config.clob_secret:
             creds = ApiCreds(
@@ -81,7 +113,7 @@ class SniperBot:
         return client
 
     async def get_market_info(self) -> Dict[str, Any]:
-        """Fetch market information from Gamma API"""
+        """Fetch market information from Gamma API and detect negative risk markets"""
         async with aiohttp.ClientSession() as session:
             url = f"{GAMMA_API}/markets"
             params = {"clob_token_ids": self.token_id}
@@ -89,7 +121,13 @@ class SniperBot:
                 if response.status == 200:
                     markets = await response.json()
                     if markets:
-                        return markets[0]
+                        market = markets[0]
+                        # Detect negative risk market (critical for 15-min crypto markets)
+                        self.is_neg_risk = market.get("negRisk", False) or market.get("neg_risk", False)
+                        self.neg_risk_checked = True
+                        if self.is_neg_risk:
+                            logger.info(f"[NEG RISK] Market is negative risk - will use neg_risk=True for orders")
+                        return market
         return {}
 
     def calculate_position_size(self, price: float) -> float:
@@ -109,7 +147,13 @@ class SniperBot:
         return True
 
     async def execute_trade(self, side: str, price: float, size: float) -> bool:
-        """Execute a FOK market order"""
+        """Execute a FOK market order
+
+        Handles known failure patterns:
+        - Insufficient liquidity: Log and skip (thin order book)
+        - Invalid signature: Log with guidance
+        - Balance/allowance: Log with guidance
+        """
         logger.info(f"{'[DRY RUN] ' if self.config.dry_run else ''}Executing {side}: ${size:.2f} @ ${price:.3f}")
 
         if self.config.dry_run:
@@ -119,7 +163,15 @@ class SniperBot:
 
         try:
             order_args = MarketOrderArgs(token_id=self.token_id, amount=size, side=BUY)
-            signed_order = self.client.create_market_order(order_args)
+
+            # Handle negative risk markets (critical for 15-min crypto markets)
+            if self.is_neg_risk:
+                options = PartialCreateOrderOptions(neg_risk=True)
+                signed_order = self.client.create_market_order(order_args, options)
+                logger.debug(f"Created order with neg_risk=True")
+            else:
+                signed_order = self.client.create_market_order(order_args)
+
             response = self.client.post_order(signed_order, OrderType.FOK)
 
             if response:
@@ -129,7 +181,19 @@ class SniperBot:
                 logger.info(f"Trade executed! Expected profit: ${expected_profit:.4f}")
                 return True
         except Exception as e:
-            logger.error(f"Trade execution failed: {e}")
+            error_msg = str(e).lower()
+
+            # Handle known failure patterns with specific guidance
+            if "insufficient liquidity" in error_msg:
+                logger.warning(f"[SKIP] Order book too thin - no liquidity at this size. Normal for last-second sniping.")
+            elif "invalid signature" in error_msg:
+                logger.error(f"[FIX NEEDED] Invalid signature - check SIGNATURE_TYPE env var (0=EOA, 1=Email, 2=Browser)")
+            elif "not enough balance" in error_msg or "allowance" in error_msg:
+                logger.error(f"[FIX NEEDED] Run 'python approve.py' first, or check USDC balance")
+            elif "cloudflare" in error_msg or "403" in error_msg:
+                logger.error(f"[RATE LIMIT] Cloudflare blocked request - wait and retry")
+            else:
+                logger.error(f"Trade execution failed: {e}")
         return False
 
     async def handle_price_update(self, data: Dict[str, Any]):
@@ -168,11 +232,16 @@ class SniperBot:
             await self.execute_trade(side, self.current_ask, size)
 
     async def connect_websocket(self):
-        """Connect to WebSocket and stream prices"""
+        """Connect to WebSocket and stream prices
+
+        Includes data timeout monitor to detect silent disconnects
+        (connection open but no data - known Polymarket issue after ~20 min)
+        """
         ws_url = f"{CLOB_WS}market"
         logger.info(f"Connecting to WebSocket: {ws_url}")
 
         subscribe_msg = {"type": "subscribe", "channel": "market", "assets_ids": [self.token_id]}
+        self.last_data_received = time.time()
 
         try:
             async with websockets.connect(ws_url) as ws:
@@ -180,9 +249,18 @@ class SniperBot:
                 await ws.send(json.dumps(subscribe_msg))
 
                 async def heartbeat():
+                    """Send pings and check for data timeout"""
                     while self.running:
                         try:
                             await ws.ping()
+
+                            # Check for silent disconnect (data timeout)
+                            time_since_data = time.time() - self.last_data_received
+                            if time_since_data > self.data_timeout_seconds:
+                                logger.warning(f"No data for {time_since_data:.0f}s - forcing reconnect")
+                                await ws.close()
+                                break
+
                             await asyncio.sleep(10)
                         except:
                             break
@@ -194,6 +272,7 @@ class SniperBot:
                         break
                     try:
                         data = json.loads(message)
+                        self.last_data_received = time.time()  # Update on any message
                         msg_type = data.get("type", "")
                         if msg_type in ("price_change", "book"):
                             await self.handle_price_update(data)

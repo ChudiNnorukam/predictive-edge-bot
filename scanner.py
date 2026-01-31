@@ -7,17 +7,86 @@ Usage:
     python scanner.py
     python scanner.py --asset BTC
     python scanner.py --asset ETH
+    python scanner.py --direct  # Use direct slug lookup (more reliable)
 """
 
 import asyncio
 import aiohttp
 import argparse
+import time
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import pytz
 from config import GAMMA_API
 
 ET = pytz.timezone("America/New_York")
+
+
+def get_15min_market_slug(coin: str = "btc") -> str:
+    """
+    Generate the correct slug for current 15-minute market.
+
+    This is the PROVEN method from GitHub Issue #244 (Jan 2026).
+    The slug format is: {coin}-updown-15m-{unix_timestamp}
+    where timestamp is rounded down to nearest 900 seconds (15 min).
+    """
+    ts = int(time.time() // 900) * 900
+    return f"{coin.lower()}-updown-15m-{ts}"
+
+
+def get_next_15min_market_slug(coin: str = "btc") -> str:
+    """Generate slug for the NEXT 15-minute market window."""
+    ts = int(time.time() // 900) * 900 + 900  # Add 15 minutes
+    return f"{coin.lower()}-updown-15m-{ts}"
+
+
+async def fetch_market_by_slug(session: aiohttp.ClientSession, slug: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch market directly by slug - more reliable than search.
+
+    This bypasses text matching issues and directly queries the market.
+    """
+    url = f"{GAMMA_API}/markets/{slug}"
+    try:
+        async with session.get(url) as response:
+            if response.status == 200:
+                return await response.json()
+            elif response.status == 404:
+                return None
+    except Exception as e:
+        print(f"[WARN] Failed to fetch market by slug: {e}")
+    return None
+
+
+async def fetch_15min_markets_direct(session: aiohttp.ClientSession, asset: str = "BTC") -> List[Dict[Any, Any]]:
+    """
+    Fetch 15-minute markets using direct slug lookup (RECOMMENDED).
+
+    This is more reliable than the search-based approach, especially
+    during off-peak hours when markets might not appear in general search.
+    """
+    markets = []
+    coin = asset.lower()
+
+    # Try current window
+    current_slug = get_15min_market_slug(coin)
+    market = await fetch_market_by_slug(session, current_slug)
+    if market:
+        market["_source"] = "direct_current"
+        markets.append(market)
+        print(f"[OK] Found current market: {current_slug}")
+    else:
+        print(f"[--] No market at: {current_slug}")
+
+    # Try next window (for pre-positioning)
+    next_slug = get_next_15min_market_slug(coin)
+    market = await fetch_market_by_slug(session, next_slug)
+    if market:
+        market["_source"] = "direct_next"
+        markets.append(market)
+        print(f"[OK] Found next market: {next_slug}")
+
+    return markets
 
 
 def get_current_window() -> tuple[datetime, datetime]:
@@ -133,14 +202,28 @@ def extract_market_info(market: Dict[Any, Any]) -> Dict[str, Any]:
     return info
 
 
-async def scan_markets(asset: str = "BTC") -> List[Dict[str, Any]]:
-    """Main function to scan for active markets."""
+async def scan_markets(asset: str = "BTC", use_direct: bool = False) -> List[Dict[str, Any]]:
+    """
+    Main function to scan for active markets.
+
+    Args:
+        asset: Crypto asset to scan (BTC, ETH, SOL, XRP)
+        use_direct: Use direct slug lookup (more reliable for 15-min markets)
+    """
     async with aiohttp.ClientSession() as session:
-        markets = await fetch_markets(session, asset)
+        if use_direct:
+            # Use proven direct slug method (GitHub Issue #244 fix)
+            raw_markets = await fetch_15min_markets_direct(session, asset)
+        else:
+            # Fall back to search-based method
+            raw_markets = await fetch_markets(session, asset)
+
         results = []
-        for market in markets:
+        for market in raw_markets:
             info = extract_market_info(market)
             if info.get("condition_id"):
+                # Add neg_risk flag to output (important for sniper.py)
+                info["neg_risk"] = market.get("negRisk", False)
                 results.append(info)
         return results
 
@@ -179,6 +262,8 @@ def main():
     parser.add_argument("--asset", "-a", default="BTC", choices=["BTC", "ETH", "SOL", "XRP"],
                        help="Asset to scan for (default: BTC)")
     parser.add_argument("--json", "-j", action="store_true", help="Output as JSON")
+    parser.add_argument("--direct", "-d", action="store_true",
+                       help="Use direct slug lookup (more reliable, recommended)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -188,15 +273,24 @@ def main():
     window_start, window_end = get_current_window()
     print(f"Current Window: {window_start.strftime('%H:%M')} - {window_end.strftime('%H:%M')} ET")
     print(f"Current Time: {datetime.now(ET).strftime('%H:%M:%S')} ET")
-    print()
-    print("Scanning for active markets...")
 
-    markets = asyncio.run(scan_markets(args.asset))
+    if args.direct:
+        # Show the slugs we're looking for
+        current_slug = get_15min_market_slug(args.asset)
+        next_slug = get_next_15min_market_slug(args.asset)
+        print(f"Looking for: {current_slug}")
+        print(f"        and: {next_slug}")
+    print()
+    print(f"Scanning for active markets... {'(direct mode)' if args.direct else '(search mode)'}")
+
+    markets = asyncio.run(scan_markets(args.asset, use_direct=args.direct))
 
     if not markets:
         print()
         print("[!] No active 15-minute markets found")
-        print("    Try again in a few minutes or use --asset ETH")
+        if not args.direct:
+            print("    TIP: Try --direct flag for more reliable detection")
+        print("    15-min markets typically run 9 AM - 11 PM ET")
         return
 
     if args.json:
@@ -206,10 +300,16 @@ def main():
         print(f"\nFound {len(markets)} active market(s):")
         for i, market in enumerate(markets):
             print_market(market, i)
+            # Show neg_risk warning
+            if market.get("neg_risk"):
+                print(f"  ⚠️  NEGATIVE RISK MARKET - sniper.py will handle automatically")
 
         print()
         print("=" * 60)
-        print("To use with sniper.py, copy the Token IDs above")
+        print("To use with sniper.py, copy the YES Token ID above:")
+        if markets:
+            yes_token = markets[0].get('yes_token_id', 'N/A')
+            print(f"  python sniper.py --token-id {yes_token}")
         print("=" * 60)
 
 
