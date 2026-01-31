@@ -28,6 +28,7 @@ from py_clob_client.clob_types import MarketOrderArgs, OrderType, ApiCreds, Part
 from py_clob_client.order_builder.constants import BUY
 
 from config import load_config, CLOB_HOST, CLOB_WS, GAMMA_API, LOG_FORMAT, LOG_DATE_FORMAT
+from utils.trade_logger import get_trade_logger
 
 # Set up logging
 logging.basicConfig(
@@ -64,6 +65,10 @@ class SniperBot:
         # Negative risk market detection (crypto 15-min markets are usually neg risk)
         self.is_neg_risk = False
         self.neg_risk_checked = False
+
+        # Enhanced trade logger for RAG analysis
+        self.trade_logger = get_trade_logger()
+        self.market_question = ""
 
         self.client = self._init_client()
 
@@ -159,6 +164,15 @@ class SniperBot:
         if self.config.dry_run:
             logger.info(f"[DRY RUN] WOULD BUY {side} at ${price:.3f}")
             self.signals_detected += 1
+            self.trade_logger.log_execution(
+                token_id=self.token_id,
+                side=side,
+                size=size,
+                price=price,
+                order_type="FOK_DRY_RUN",
+                success=True,
+                execution_time_ms=0
+            )
             return True
 
         try:
@@ -179,6 +193,15 @@ class SniperBot:
                 expected_profit = (1.0 - price) * size
                 self.total_profit += expected_profit
                 logger.info(f"Trade executed! Expected profit: ${expected_profit:.4f}")
+                self.trade_logger.log_execution(
+                    token_id=self.token_id,
+                    side=side,
+                    size=size,
+                    price=price,
+                    order_type="FOK",
+                    success=True,
+                    order_id=str(response) if response else None
+                )
                 return True
         except Exception as e:
             error_msg = str(e).lower()
@@ -194,6 +217,15 @@ class SniperBot:
                 logger.error(f"[RATE LIMIT] Cloudflare blocked request - wait and retry")
             else:
                 logger.error(f"Trade execution failed: {e}")
+            self.trade_logger.log_execution(
+                token_id=self.token_id,
+                side=side,
+                size=size,
+                price=price,
+                order_type="FOK",
+                success=False,
+                error_message=str(e)[:200]
+            )
         return False
 
     async def handle_price_update(self, data: Dict[str, Any]):
@@ -226,6 +258,18 @@ class SniperBot:
             logger.info("EXECUTION SIGNAL!")
             logger.info(f"Time: {time_remaining:.2f}s | Ask: ${self.current_ask:.3f}")
             logger.info("=" * 50)
+
+            # Log the opportunity
+            self.trade_logger.log_opportunity(
+                token_id=self.token_id,
+                market_question=self.market_question,
+                current_price=self.last_price,
+                time_remaining_seconds=time_remaining,
+                bid=self.current_bid,
+                ask=self.current_ask,
+                spread=self.current_ask - self.current_bid if self.current_bid else 0,
+                is_neg_risk=self.is_neg_risk
+            )
 
             size = self.calculate_position_size(self.current_ask)
             side = "YES" if self.last_price > 0.50 else "NO"
@@ -297,9 +341,18 @@ class SniperBot:
         logger.info(f"Max Buy Price: ${self.config.max_buy_price}")
         logger.info("=" * 60)
 
+        # Log session start
+        self.trade_logger.log_session_start({
+            "token_id": self.token_id,
+            "dry_run": self.config.dry_run,
+            "max_buy_price": self.config.max_buy_price,
+            "signature_type": int(os.getenv("SIGNATURE_TYPE", "2"))
+        })
+
         market_info = await self.get_market_info()
         if market_info:
-            logger.info(f"Market: {market_info.get('question', 'Unknown')}")
+            self.market_question = market_info.get('question', 'Unknown')
+            logger.info(f"Market: {self.market_question}")
             end_date = market_info.get("endDate") or market_info.get("end_date_iso")
             if end_date:
                 try:
@@ -321,6 +374,13 @@ class SniperBot:
         logger.info("Bot Stopped")
         logger.info(f"Signals: {self.signals_detected} | Trades: {self.trades_executed} | Profit: ${self.total_profit:.4f}")
         logger.info("=" * 60)
+
+        # Log session end
+        self.trade_logger.log_session_end({
+            "signals_detected": self.signals_detected,
+            "trades_executed": self.trades_executed,
+            "total_profit": self.total_profit
+        })
 
     def stop(self):
         logger.info("Stopping...")
