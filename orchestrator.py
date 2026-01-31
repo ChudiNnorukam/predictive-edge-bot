@@ -96,6 +96,19 @@ class StrategyOrchestrator:
                     )
                     self.strategies.append(strategy)
 
+                elif strategy_name == "exit_manager":
+                    from strategies.exit_manager import ExitManagerStrategy
+
+                    strategy = ExitManagerStrategy(
+                        config=self.config,
+                        executor=self.executor,
+                        position_store=self.position_store,
+                        take_profit_pct=0.01,  # 1% profit target
+                        stop_loss_pct=0.005,  # 0.5% stop loss
+                        max_hold_seconds=3600,  # 1 hour max hold
+                    )
+                    self.strategies.append(strategy)
+
                 else:
                     logger.warning(f"Unknown strategy: {strategy_name}")
 

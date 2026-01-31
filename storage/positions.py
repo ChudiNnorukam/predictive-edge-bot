@@ -113,9 +113,31 @@ class PositionStore:
                     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed', 'error')),
                     strategy TEXT,
                     metadata TEXT,
-                    updated_at INTEGER NOT NULL
+                    updated_at INTEGER NOT NULL,
+                    take_profit_price REAL,
+                    stop_loss_price REAL,
+                    max_hold_seconds INTEGER DEFAULT 3600,
+                    exit_reason TEXT
                 )
             """)
+
+            # Migration: Add exit columns to existing table (if upgrading)
+            try:
+                await db.execute("ALTER TABLE positions ADD COLUMN take_profit_price REAL")
+            except Exception:
+                pass  # Column already exists
+            try:
+                await db.execute("ALTER TABLE positions ADD COLUMN stop_loss_price REAL")
+            except Exception:
+                pass
+            try:
+                await db.execute("ALTER TABLE positions ADD COLUMN max_hold_seconds INTEGER DEFAULT 3600")
+            except Exception:
+                pass
+            try:
+                await db.execute("ALTER TABLE positions ADD COLUMN exit_reason TEXT")
+            except Exception:
+                pass
 
             # Trades table
             await db.execute("""
