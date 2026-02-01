@@ -34,6 +34,7 @@ class Config:
     daily_loss_limit_pct: float
     min_price_threshold: float
     max_buy_price: float
+    starting_bankroll: float
 
     # Safety
     dry_run: bool
@@ -76,6 +77,7 @@ def load_config() -> Config:
         daily_loss_limit_pct=float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.05")),
         min_price_threshold=float(os.getenv("MIN_PRICE_THRESHOLD", "0.99")),
         max_buy_price=float(os.getenv("MAX_BUY_PRICE", "0.99")),
+        starting_bankroll=float(os.getenv("STARTING_BANKROLL", "1000.0")),
 
         # Safety
         dry_run=os.getenv("DRY_RUN", "True").lower() in ("true", "1", "yes"),
