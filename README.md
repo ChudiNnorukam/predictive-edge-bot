@@ -34,11 +34,8 @@ cp .env.example .env
 # Approve USDC (one-time)
 python approve.py
 
-# Scan for markets
-python scanner.py --direct
-
-# Run sniper (dry run)
-python sniper.py --token-id <TOKEN_ID>
+# Run enhanced sniper (multi-market mode)
+python sniper_v2.py --multi --max-markets 5
 ```
 
 ---
@@ -46,20 +43,37 @@ python sniper.py --token-id <TOKEN_ID>
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    PredictiveEdge                        │
-├─────────────────────────────────────────────────────────┤
-│                                                          │
-│  scanner.py          sniper.py           trade_logger   │
-│  ┌──────────┐       ┌──────────┐        ┌──────────┐   │
-│  │ Find     │──────▶│ Monitor  │───────▶│ Log JSON │   │
-│  │ Markets  │       │ & Execute│        │ for RAG  │   │
-│  └──────────┘       └──────────┘        └──────────┘   │
-│       │                  │                    │         │
-│       ▼                  ▼                    ▼         │
-│  Gamma API          CLOB WebSocket      logs/trades/   │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         PredictiveEdge v2                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                │
+│  │   Scanner   │───▶│ State       │───▶│  Sniper     │                │
+│  │   (Gamma)   │    │ Machine     │    │  Executor   │                │
+│  └─────────────┘    └─────────────┘    └─────────────┘                │
+│         │                 │                   │                        │
+│         ▼                 ▼                   ▼                        │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                │
+│  │  WebSocket  │    │    Risk     │    │   Capital   │                │
+│  │  Feed Mgr   │    │   Manager   │    │  Allocator  │                │
+│  └─────────────┘    └─────────────┘    └─────────────┘                │
+│         │                 │                   │                        │
+│         └────────────────┼───────────────────┘                        │
+│                          ▼                                             │
+│                   ┌─────────────┐                                      │
+│                   │   Metrics   │                                      │
+│                   │  Collector  │                                      │
+│                   └─────────────┘                                      │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Market State Machine
+
+```
+DISCOVERED → WATCHING → ELIGIBLE → EXECUTING → RECONCILING → DONE
+                ↓           ↓           ↓
+            STALE_FEED   ON_HOLD    FAILED
 ```
 
 ---
@@ -68,21 +82,53 @@ python sniper.py --token-id <TOKEN_ID>
 
 ```
 predictive-edge-bot/
-├── scanner.py              # Market discovery
-├── sniper.py               # Core trading bot
+├── sniper_v2.py            # Enhanced multi-market sniper bot
+├── sniper.py               # Legacy single-market bot
+├── scanner.py              # Legacy market scanner
+│
+├── core/                   # Core state management
+│   ├── market_state.py     # MarketStateMachine + Market model
+│   └── priority_queue.py   # Priority-based market scheduling
+│
+├── risk/                   # Risk management engine
+│   ├── kill_switches.py    # Emergency halt system
+│   ├── circuit_breakers.py # Per-market failure isolation
+│   └── exposure_manager.py # Position limits & exposure tracking
+│
+├── capital/                # Capital allocation
+│   ├── allocator.py        # Per-market & total exposure limits
+│   └── recycler.py         # Capital recycling after trades
+│
+├── metrics/                # Observability
+│   ├── collector.py        # Trade metrics collection
+│   └── dashboard.py        # Real-time stats
+│
+├── scheduler/              # Multi-market scheduling
+│   ├── scheduler.py        # Execution window management
+│   └── execution_window.py # Time-based trade triggering
+│
 ├── config.py               # Configuration loader
-├── approve.py              # USDC approval for trading
+├── config_v2.py            # Unified config with presets
+├── orchestrator_v2.py      # Full system orchestrator
+├── feed_manager.py         # WebSocket price feed manager
+│
 ├── utils/
 │   ├── trade_logger.py     # RAG-ready JSON logging
 │   └── notifications.py    # Alert system
-├── strategies/             # Strategy implementations
-├── storage/                # Database layer
+│
+├── tests/
+│   ├── test_sniper_v2.py           # Sniper integration tests
+│   ├── test_full_integration.py    # End-to-end tests
+│   ├── test_market_state_machine.py
+│   └── test_risk_controls.py
+│
 ├── docs/
-│   ├── PARTNER_BRIEF.md    # Non-technical overview
-│   ├── AUTO_SNIPER_SETUP.md# Deployment guide
-│   └── TEXT_TO_PARTNERS.md # Communication templates
+│   ├── PARTNER_BRIEF.md
+│   └── AUTO_SNIPER_SETUP.md
+│
 ├── logs/
 │   └── trades/             # JSON trade logs (gitignored)
+│
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -92,78 +138,148 @@ predictive-edge-bot/
 
 ## Configuration
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `PRIVATE_KEY` | Wallet private key | Yes |
-| `WALLET_ADDRESS` | Wallet address (0x...) | Yes |
-| `CLOB_API_KEY` | Polymarket API key | Yes |
-| `CLOB_SECRET` | Polymarket API secret | Yes |
-| `CLOB_PASSPHRASE` | Polymarket API passphrase | Yes |
-| `SIGNATURE_TYPE` | 0=EOA, 1=Email, 2=Browser | Yes |
-| `DRY_RUN` | True=simulate, False=live | Yes |
-| `MAX_BUY_PRICE` | Max price to pay (default: 0.99) | No |
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PRIVATE_KEY` | Wallet private key | Required |
+| `WALLET_ADDRESS` | Wallet address (0x...) | Required |
+| `CLOB_API_KEY` | Polymarket API key | "" |
+| `CLOB_SECRET` | Polymarket API secret | "" |
+| `CLOB_PASSPHRASE` | Polymarket API passphrase | "" |
+| `DRY_RUN` | True=simulate, False=live | True |
+| `MAX_BUY_PRICE` | Max price to pay | 0.99 |
+| `STARTING_BANKROLL` | Initial capital | 1000.0 |
+
+### Config Presets (config_v2.py)
+
+```python
+# Conservative: Lower risk, smaller positions
+CONSERVATIVE_PROFILE
+
+# Aggressive: Higher exposure, more markets
+AGGRESSIVE_PROFILE
+
+# Paper Trading: Safe testing mode
+PAPER_TRADING_PROFILE
+```
 
 ---
 
-## Strategies
+## Risk Management
 
-### Sniper (Active)
-- Monitors 15-minute crypto markets (BTC, ETH, SOL)
-- Executes at T-minus 1 second when outcome is clear
-- Buys when price < $0.99 and probability > 95%
-- FOK orders for guaranteed fill or cancel
+### Kill Switches
+- **Stale Feed**: Halts if price feed > 500ms old
+- **RPC Lag**: Halts if blockchain RPC unresponsive
+- **Manual**: Emergency stop via API/signal
 
-### Copy Trader (Planned)
-- Mirrors successful Polymarket wallets
-- Configurable delay and position sizing
+### Circuit Breakers
+- Per-market failure isolation
+- Auto-reset after cooldown
+- Prevents cascade failures
 
-### RAG-Powered Optimization (Planned)
-- Machine learning on trade history
-- Automatic strategy parameter tuning
+### Exposure Limits
+- Max 5% per market
+- Max 30% total exposure
+- Per-market absolute caps ($50 default)
+
+---
+
+## Usage
+
+### Multi-Market Mode (Recommended)
+```bash
+python sniper_v2.py --multi --max-markets 5
+```
+
+### Single Token Mode
+```bash
+python sniper_v2.py --token-id <TOKEN_ID>
+```
+
+### CLI Options
+```
+--multi, -m           Enable multi-market mode
+--token-id, -t        Single token to monitor
+--max-markets         Max concurrent markets (default: 5)
+--max-buy-price       Max price threshold (default: 0.99)
+```
 
 ---
 
 ## Deployment
 
-### Local Development
+### Production (VPS + PM2)
+
 ```bash
-python scanner.py --direct
-python sniper.py --token-id <TOKEN>
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Configure
+cp .env.example .env
+nano .env  # Add credentials
+
+# Create logs directory
+mkdir -p logs
+
+# Start with PM2
+pm2 start "source venv/bin/activate && python sniper_v2.py --multi --max-markets 5" \
+  --name sniper --cwd /root/polymarket-bot
+
+# Auto-start on reboot
+pm2 save
+pm2 startup
 ```
 
-### Production (VPS)
+### PM2 Commands
 ```bash
-# PM2 for process management
-pm2 start sniper.py --name "sniper" --interpreter ./venv/bin/python -- --token-id <TOKEN>
-
-# Cron for auto-scheduling (Mon-Fri, market hours)
-*/15 6-20 * * 1-5 /opt/polymarket-bot/auto_sniper.sh >> logs/auto.log 2>&1
+pm2 status          # Check status
+pm2 logs sniper     # View logs
+pm2 restart sniper  # Restart
+pm2 stop sniper     # Stop
+pm2 monit           # Real-time dashboard
 ```
-
-See [docs/AUTO_SNIPER_SETUP.md](docs/AUTO_SNIPER_SETUP.md) for full deployment guide.
 
 ---
 
-## Logging & Analytics
+## Testing
 
-Trade logs are stored as JSON Lines for RAG/ML analysis:
+```bash
+# Run all tests
+pytest tests/ -v
 
-```json
-{"timestamp":"2026-02-03T14:15:32Z","event_type":"EXECUTION","token_id":"123...","side":"YES","price":0.98,"success":true}
+# Run specific test suite
+pytest tests/test_sniper_v2.py -v
+pytest tests/test_full_integration.py -v
+
+# Test coverage
+pytest tests/ --cov=. --cov-report=html
 ```
 
-Log location: `logs/trades/trades_YYYY-MM-DD.jsonl`
+**Test Coverage:**
+- 26 tests passing
+- State machine lifecycle
+- Risk controls (kill switches, circuit breakers)
+- Capital allocation limits
+- Metrics collection
+- Multi-market execution
 
 ---
 
 ## Roadmap
 
 - [x] Phase 1: Core sniper strategy
-- [x] Phase 2: Production deployment (VPS + PM2 + Cron)
+- [x] Phase 2: Production deployment (VPS + PM2)
 - [x] Phase 3: Enhanced logging for RAG
-- [ ] Phase 4: RAG-powered strategy optimization
-- [ ] Phase 5: Copy trader integration
-- [ ] Phase 6: Multi-strategy orchestration
+- [x] Phase 4: **Multi-market scaling system**
+  - [x] Market State Machine
+  - [x] Risk Controls Engine
+  - [x] Capital Allocation System
+  - [x] Metrics & Observability
+- [ ] Phase 5: RAG-powered strategy optimization
+- [ ] Phase 6: Copy trader integration
 - [ ] Phase 7: Real-time dashboard
 
 ---
@@ -176,7 +292,7 @@ This software is for educational and research purposes. Trading prediction marke
 
 ## Team
 
-Built by **PredictiveEdge** | January 2026
+Built by **PredictiveEdge** | February 2026
 
 ---
 
