@@ -670,7 +670,7 @@ class EnhancedSniperBot:
             logger.debug(f"[{market_id[:16]}] {old_state.value} → {new_state.value}")
 
         # Get eligible markets
-        eligible_markets = self.state_machine.get_eligible_markets()
+        eligible_markets = await self.state_machine.get_markets_by_state(MarketState.ELIGIBLE)
 
         for market in eligible_markets:
             prices = self.market_prices.get(market.token_id, {})
