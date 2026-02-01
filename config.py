@@ -138,3 +138,36 @@ SCHEDULER_STALE_FEED_THRESHOLD_MS = int(
 )
 SCHEDULER_MAX_FAILURE_COUNT = int(os.getenv("SCHEDULER_MAX_FAILURE_COUNT", "3"))
 SCHEDULER_TICK_INTERVAL_MS = int(os.getenv("SCHEDULER_TICK_INTERVAL_MS", "10"))
+
+
+# ==============================================================================
+# Spread Capture Strategy Configuration
+# ==============================================================================
+# Inspired by distinct-baguette's near-zero-loss trading approach:
+# Buy at bid, sell at ask, or arbitrage both sides when combined < $1
+
+# Entry criteria
+SPREAD_MIN_SPREAD_PCT = float(os.getenv("SPREAD_MIN_SPREAD_PCT", "2.0"))  # Minimum spread to trade
+SPREAD_MAX_SPREAD_PCT = float(os.getenv("SPREAD_MAX_SPREAD_PCT", "15.0"))  # Max spread (avoid illiquid)
+SPREAD_MIN_LIQUIDITY_USD = float(os.getenv("SPREAD_MIN_LIQUIDITY_USD", "100.0"))  # Min depth
+
+# Exit targets
+SPREAD_EXIT_TARGET_PCT = float(os.getenv("SPREAD_EXIT_TARGET_PCT", "2.0"))  # Target profit per trade
+SPREAD_STOP_LOSS_PCT = float(os.getenv("SPREAD_STOP_LOSS_PCT", "5.0"))  # Max loss per trade
+SPREAD_MAX_HOLD_SEC = int(os.getenv("SPREAD_MAX_HOLD_SEC", "600"))  # 10 min max hold
+
+# Pre-expiry safety (CRITICAL: exit before resolution to avoid directional risk)
+SPREAD_EXIT_BEFORE_EXPIRY_SEC = int(os.getenv("SPREAD_EXIT_BEFORE_EXPIRY_SEC", "60"))  # Exit 60s before
+SPREAD_NO_ENTRY_BEFORE_EXPIRY_SEC = int(os.getenv("SPREAD_NO_ENTRY_BEFORE_EXPIRY_SEC", "120"))  # No entry in final 2 min
+
+# Position sizing
+SPREAD_MAX_POSITION_USD = float(os.getenv("SPREAD_MAX_POSITION_USD", "50.0"))  # Max per position
+SPREAD_MAX_CONCURRENT_POSITIONS = int(os.getenv("SPREAD_MAX_CONCURRENT_POSITIONS", "5"))  # Max positions
+SPREAD_MAX_TOTAL_EXPOSURE_USD = float(os.getenv("SPREAD_MAX_TOTAL_EXPOSURE_USD", "250.0"))  # Total exposure
+
+# Arbitrage mode (buy both YES and NO when combined < $1)
+SPREAD_ENABLE_ARBITRAGE = os.getenv("SPREAD_ENABLE_ARBITRAGE", "True").lower() in ("true", "1", "yes")
+SPREAD_MAX_ARBITRAGE_COST = float(os.getenv("SPREAD_MAX_ARBITRAGE_COST", "0.98"))  # Max combined cost
+
+# Scanning
+SPREAD_SCAN_INTERVAL_SEC = float(os.getenv("SPREAD_SCAN_INTERVAL_SEC", "5.0"))  # How often to scan

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from functools import partial
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType, ApiCreds
+from py_clob_client.clob_types import MarketOrderArgs, OrderType, ApiCreds, OrderArgs
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from config import CLOB_HOST
@@ -361,3 +361,242 @@ class OrderExecutor:
             "pending_orders": len(self.pending_orders),
             "rate_limit_window": len(self.order_timestamps),
         }
+
+    # =========================================================================
+    # Limit Order Methods (for Spread Capture Strategy)
+    # =========================================================================
+
+    async def place_limit_order(
+        self,
+        token_id: str,
+        side: str,
+        action: str,
+        price: float,
+        size: float,
+        strategy: str = "spread_capture",
+    ) -> Optional[str]:
+        """
+        Place a GTC (Good Till Cancelled) limit order.
+
+        Args:
+            token_id: Market token ID
+            side: YES or NO
+            action: BUY or SELL
+            price: Limit price (0-1)
+            size: Order size in USDC
+            strategy: Strategy name for logging
+
+        Returns:
+            Order ID if successful, None otherwise
+        """
+        start_time = time.time()
+
+        # Validate inputs
+        if side not in ("YES", "NO"):
+            logger.error(f"Invalid side: {side}")
+            return None
+        if action not in ("BUY", "SELL"):
+            logger.error(f"Invalid action: {action}")
+            return None
+        if not (0 < price < 1):
+            logger.error(f"Invalid price: {price}")
+            return None
+        if size <= 0:
+            logger.error(f"Invalid size: {size}")
+            return None
+
+        # Check rate limit
+        if not await self._check_rate_limit():
+            await asyncio.sleep(1)
+            if not await self._check_rate_limit():
+                logger.error("Rate limit exceeded for limit order")
+                return None
+
+        logger.info(
+            f"{'[DRY RUN] ' if self.config.dry_run else ''}Placing limit {action}: "
+            f"{strategy} | {side} @ ${price:.3f} x ${size:.2f}"
+        )
+
+        if self.config.dry_run:
+            # Return fake order ID for dry run
+            fake_order_id = f"dry_run_{token_id[:8]}_{int(time.time())}"
+            logger.info(f"[DRY RUN] Limit order placed: {fake_order_id}")
+            return fake_order_id
+
+        try:
+            # Determine side for py_clob_client
+            clob_side = BUY if action == "BUY" else SELL
+
+            # Create limit order args
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=clob_side,
+            )
+
+            # Get event loop for running blocking calls
+            loop = asyncio.get_event_loop()
+
+            # Sign order in thread pool (blocking call)
+            signed_order = await loop.run_in_executor(
+                self._executor,
+                partial(self.client.create_order, order_args)
+            )
+
+            # Submit order as GTC (Good Till Cancelled)
+            response = await loop.run_in_executor(
+                self._executor,
+                partial(self.client.post_order, signed_order, OrderType.GTC)
+            )
+
+            if response:
+                order_id = response.get("orderID") or response.get("id")
+                latency = time.time() - start_time
+
+                logger.info(
+                    f"Limit order placed: {order_id} | {action} {side} @ ${price:.3f} | "
+                    f"Latency: {latency:.3f}s"
+                )
+                return order_id
+
+        except Exception as e:
+            logger.error(f"Failed to place limit order: {e}", exc_info=True)
+
+        return None
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """
+        Cancel a specific order by ID.
+
+        Args:
+            order_id: Order ID to cancel
+
+        Returns:
+            True if cancellation succeeded
+        """
+        if self.config.dry_run:
+            logger.info(f"[DRY RUN] Would cancel order: {order_id}")
+            return True
+
+        try:
+            loop = asyncio.get_event_loop()
+
+            response = await loop.run_in_executor(
+                self._executor,
+                partial(self.client.cancel, order_id)
+            )
+
+            if response:
+                logger.info(f"Order cancelled: {order_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to cancel order {order_id}: {e}")
+
+        return False
+
+    async def cancel_all_orders(self, token_id: Optional[str] = None) -> int:
+        """
+        Cancel all open orders, optionally filtered by token.
+
+        Args:
+            token_id: Optional token ID filter
+
+        Returns:
+            Number of orders cancelled
+        """
+        if self.config.dry_run:
+            logger.info(f"[DRY RUN] Would cancel all orders for: {token_id or 'all markets'}")
+            return 0
+
+        try:
+            loop = asyncio.get_event_loop()
+
+            if token_id:
+                # Cancel orders for specific market
+                response = await loop.run_in_executor(
+                    self._executor,
+                    partial(self.client.cancel_market_orders, token_id)
+                )
+            else:
+                # Cancel all orders
+                response = await loop.run_in_executor(
+                    self._executor,
+                    self.client.cancel_all
+                )
+
+            if response:
+                cancelled = response.get("canceled", []) if isinstance(response, dict) else []
+                count = len(cancelled) if isinstance(cancelled, list) else 0
+                logger.info(f"Cancelled {count} orders")
+                return count
+
+        except Exception as e:
+            logger.error(f"Failed to cancel orders: {e}")
+
+        return 0
+
+    async def get_open_orders(self, token_id: Optional[str] = None) -> list:
+        """
+        Get all open orders, optionally filtered by token.
+
+        Args:
+            token_id: Optional token ID filter
+
+        Returns:
+            List of open order dictionaries
+        """
+        if self.config.dry_run:
+            return []
+
+        try:
+            loop = asyncio.get_event_loop()
+
+            # Fetch orders
+            response = await loop.run_in_executor(
+                self._executor,
+                self.client.get_orders
+            )
+
+            if response:
+                orders = response if isinstance(response, list) else []
+
+                # Filter by token if specified
+                if token_id:
+                    orders = [o for o in orders if o.get("asset_id") == token_id]
+
+                return orders
+
+        except Exception as e:
+            logger.error(f"Failed to fetch open orders: {e}")
+
+        return []
+
+    async def get_order_status(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get status of a specific order.
+
+        Args:
+            order_id: Order ID to check
+
+        Returns:
+            Order dictionary or None if not found
+        """
+        if self.config.dry_run:
+            return {"orderID": order_id, "status": "OPEN", "filledSize": 0}
+
+        try:
+            loop = asyncio.get_event_loop()
+
+            response = await loop.run_in_executor(
+                self._executor,
+                partial(self.client.get_order, order_id)
+            )
+
+            return response if response else None
+
+        except Exception as e:
+            logger.error(f"Failed to get order status {order_id}: {e}")
+
+        return None

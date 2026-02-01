@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-sniper_v2.py - Enhanced Multi-Market Expiration Sniping Bot
-============================================================
+sniper_v2.py - Enhanced Multi-Market Trading Bot
+=================================================
+
+Supports multiple trading strategies:
+1. SNIPER: Buy assets trading below $0.99 in final seconds before settlement
+2. SPREAD-CAPTURE: Market-making style trading - buy at bid, sell at ask
 
 Integrates with scaling modules:
 - MarketStateMachine: Lifecycle tracking (DISCOVERED → WATCHING → ELIGIBLE → EXECUTING → DONE)
@@ -9,15 +13,18 @@ Integrates with scaling modules:
 - CapitalAllocator: Position sizing with per-market and total limits
 - MetricsCollector: Execution latency, fill rates, P&L tracking
 
-Strategy: Buy assets trading below $0.99 in the final seconds before
-settlement when the outcome is already determined.
-
 Usage:
-    # Single market mode (legacy)
+    # Single market mode (legacy sniper)
     python sniper_v2.py --token-id <TOKEN_ID>
 
-    # Multi-market mode (new)
+    # Multi-market sniper mode
     python sniper_v2.py --multi --max-markets 5
+
+    # Spread capture mode (market making)
+    python sniper_v2.py --strategy spread-capture --max-markets 3
+
+    # Combined mode (both strategies)
+    python sniper_v2.py --strategy hybrid --max-markets 5
 """
 
 import asyncio
@@ -40,7 +47,15 @@ from py_clob_client.clob_types import MarketOrderArgs, OrderType, ApiCreds, Part
 from py_clob_client.order_builder.constants import BUY
 
 # Core config
-from config import load_config, CLOB_HOST, CLOB_WS, GAMMA_API, LOG_FORMAT, LOG_DATE_FORMAT
+from config import (
+    load_config, CLOB_HOST, CLOB_WS, GAMMA_API, LOG_FORMAT, LOG_DATE_FORMAT,
+    # Spread capture config
+    SPREAD_MIN_SPREAD_PCT, SPREAD_MAX_SPREAD_PCT, SPREAD_MIN_LIQUIDITY_USD,
+    SPREAD_EXIT_TARGET_PCT, SPREAD_STOP_LOSS_PCT, SPREAD_MAX_HOLD_SEC,
+    SPREAD_EXIT_BEFORE_EXPIRY_SEC, SPREAD_NO_ENTRY_BEFORE_EXPIRY_SEC,
+    SPREAD_MAX_POSITION_USD, SPREAD_MAX_CONCURRENT_POSITIONS, SPREAD_MAX_TOTAL_EXPOSURE_USD,
+    SPREAD_ENABLE_ARBITRAGE, SPREAD_MAX_ARBITRAGE_COST, SPREAD_SCAN_INTERVAL_SEC,
+)
 
 # Scaling modules
 from core import Market, MarketState, MarketStateMachine, SchedulerConfig
@@ -58,6 +73,13 @@ from metrics import MetricsCollector, MetricsConfig, TradeMetrics
 
 # Utilities
 from utils.trade_logger import get_trade_logger
+
+# Spread capture strategy
+from strategies.spread_capture import SpreadCaptureStrategy, SpreadCaptureConfig
+from strategies.position_tracker import PositionTracker
+from strategies.order_manager import OrderManager
+from executor import OrderExecutor
+from storage import PositionStore
 
 # Logging setup
 logging.basicConfig(
@@ -834,7 +856,7 @@ class EnhancedSniperBot:
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Enhanced Polymarket Expiration Sniping Bot"
+        description="Enhanced Polymarket Multi-Strategy Trading Bot"
     )
     parser.add_argument(
         "--token-id", "-t",
@@ -857,12 +879,18 @@ async def main():
         default=0.99,
         help="Maximum buy price threshold",
     )
+    parser.add_argument(
+        "--strategy", "-s",
+        choices=["sniper", "spread-capture", "hybrid"],
+        default="sniper",
+        help="Trading strategy: sniper (expiration), spread-capture (market-making), or hybrid (both)",
+    )
 
     args = parser.parse_args()
 
     # Validate args
-    if not args.token_id and not args.multi:
-        parser.error("Either --token-id or --multi is required")
+    if args.strategy == "sniper" and not args.token_id and not args.multi:
+        parser.error("Sniper strategy requires either --token-id or --multi")
 
     # Load config
     try:
@@ -871,10 +899,22 @@ async def main():
         logger.error(f"Config error: {e}")
         sys.exit(1)
 
+    # Strategy selection
+    if args.strategy in ("spread-capture", "hybrid"):
+        # Run spread capture strategy
+        await run_spread_capture(bot_config, args)
+
+    if args.strategy in ("sniper", "hybrid"):
+        # Run sniper strategy
+        await run_sniper(bot_config, args)
+
+
+async def run_sniper(bot_config, args):
+    """Run the expiration sniper strategy."""
     # Create sniper config
     sniper_config = SniperConfig(
         max_buy_price=args.max_buy_price,
-        multi_market_mode=args.multi,
+        multi_market_mode=args.multi or args.strategy == "hybrid",
         max_concurrent_markets=args.max_markets,
     )
 
@@ -897,6 +937,74 @@ async def main():
         await bot.run()
     except KeyboardInterrupt:
         bot.stop()
+
+
+async def run_spread_capture(bot_config, args):
+    """Run the spread capture / market-making strategy."""
+    logger.info("=" * 60)
+    logger.info("Starting Spread Capture Strategy")
+    logger.info("=" * 60)
+
+    # Initialize storage
+    position_store = PositionStore()
+    await position_store.initialize()
+
+    # Initialize executor with limit order support
+    executor = OrderExecutor(bot_config, position_store)
+
+    # Initialize position tracker
+    position_tracker = PositionTracker(
+        max_positions=SPREAD_MAX_CONCURRENT_POSITIONS
+    )
+
+    # Initialize order manager
+    order_manager = OrderManager(
+        executor=executor,
+        max_orders_per_market=2,
+        stale_order_seconds=300,
+    )
+
+    # Create spread capture config from environment
+    spread_config = SpreadCaptureConfig(
+        min_spread_pct=SPREAD_MIN_SPREAD_PCT,
+        max_spread_pct=SPREAD_MAX_SPREAD_PCT,
+        min_liquidity_usd=SPREAD_MIN_LIQUIDITY_USD,
+        exit_target_pct=SPREAD_EXIT_TARGET_PCT,
+        stop_loss_pct=SPREAD_STOP_LOSS_PCT,
+        max_hold_seconds=SPREAD_MAX_HOLD_SEC,
+        exit_before_expiry_seconds=SPREAD_EXIT_BEFORE_EXPIRY_SEC,
+        no_entry_before_expiry_seconds=SPREAD_NO_ENTRY_BEFORE_EXPIRY_SEC,
+        max_position_usd=SPREAD_MAX_POSITION_USD,
+        max_concurrent_positions=SPREAD_MAX_CONCURRENT_POSITIONS,
+        max_total_exposure_usd=SPREAD_MAX_TOTAL_EXPOSURE_USD,
+        enable_arbitrage=SPREAD_ENABLE_ARBITRAGE,
+        max_arbitrage_cost=SPREAD_MAX_ARBITRAGE_COST,
+        scan_interval_seconds=SPREAD_SCAN_INTERVAL_SEC,
+    )
+
+    # Create strategy
+    strategy = SpreadCaptureStrategy(
+        config=bot_config,
+        executor=executor,
+        position_tracker=position_tracker,
+        order_manager=order_manager,
+        spread_config=spread_config,
+    )
+
+    # Signal handlers
+    def signal_handler(sig, frame):
+        strategy.stop()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Run strategy
+    try:
+        await strategy.run()
+    except KeyboardInterrupt:
+        strategy.stop()
+    finally:
+        await position_store.close()
 
 
 if __name__ == "__main__":
