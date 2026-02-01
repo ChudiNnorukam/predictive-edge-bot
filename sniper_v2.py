@@ -685,7 +685,7 @@ class EnhancedSniperBot:
                 markets = await self.discover_markets()
 
                 # Limit concurrent markets
-                current_count = len(self.state_machine.get_all_markets())
+                current_count = len(self.state_machine.markets)
                 available_slots = self.sniper_config.max_concurrent_markets - current_count
 
                 for market_data in markets[:available_slots]:
