@@ -78,10 +78,13 @@ class SpreadCaptureConfig:
     exit_before_expiry_seconds: int = 60  # Exit 60s before market closes
     no_entry_before_expiry_seconds: int = 120  # No new entries in final 2 min
 
-    # Position sizing
-    max_position_usd: float = 50.0  # Max per position
+    # Position sizing (percentage-based for compounding)
+    position_size_pct: float = 0.25  # 25% of bankroll per position
+    max_exposure_pct: float = 0.75  # 75% max total exposure
     max_concurrent_positions: int = 5  # Max simultaneous positions
-    max_total_exposure_usd: float = 250.0  # Max total exposure
+    # Safety caps (0 = no cap, uses percentage only)
+    max_position_usd: float = 0  # Hard cap per position
+    max_total_exposure_usd: float = 0  # Hard cap total exposure
 
     # Arbitrage mode
     enable_arbitrage: bool = True  # Try to buy both sides
@@ -152,12 +155,60 @@ class SpreadCaptureStrategy(BaseStrategy):
         self.arbitrage_opportunities = 0
         self.spread_trades_executed = 0
 
+        # Bankroll tracking for percentage-based sizing
+        self.starting_bankroll = config.starting_bankroll
+        self.current_bankroll = config.starting_bankroll
+
         logger.info(
             f"SpreadCaptureStrategy initialized | "
             f"Min spread: {self.spread_config.min_spread_pct}% | "
             f"Exit target: {self.spread_config.exit_target_pct}% | "
-            f"Max position: ${self.spread_config.max_position_usd}"
+            f"Position size: {self.spread_config.position_size_pct*100:.0f}% of bankroll | "
+            f"Starting bankroll: ${self.starting_bankroll:.2f}"
         )
+
+    def calculate_position_size(self) -> float:
+        """
+        Calculate position size based on current bankroll.
+
+        Uses percentage-based sizing for compounding:
+        - position_size_pct of current bankroll
+        - Capped by max_position_usd if set (> 0)
+
+        Returns:
+            Position size in USDC
+        """
+        # Update current bankroll with realized P&L
+        self.current_bankroll = self.starting_bankroll + self.position_tracker.total_realized_pnl
+
+        # Calculate percentage-based size
+        size = self.current_bankroll * self.spread_config.position_size_pct
+
+        # Apply hard cap if set
+        if self.spread_config.max_position_usd > 0:
+            size = min(size, self.spread_config.max_position_usd)
+
+        # Minimum viable size
+        size = max(size, 1.0)
+
+        return size
+
+    def calculate_max_exposure(self) -> float:
+        """
+        Calculate maximum total exposure based on current bankroll.
+
+        Returns:
+            Max exposure in USDC
+        """
+        self.current_bankroll = self.starting_bankroll + self.position_tracker.total_realized_pnl
+
+        exposure = self.current_bankroll * self.spread_config.max_exposure_pct
+
+        # Apply hard cap if set
+        if self.spread_config.max_total_exposure_usd > 0:
+            exposure = min(exposure, self.spread_config.max_total_exposure_usd)
+
+        return exposure
 
     async def run(self):
         """Main strategy loop."""
@@ -234,9 +285,10 @@ class SpreadCaptureStrategy(BaseStrategy):
             if existing:
                 continue
 
-            # Check capacity
+            # Check capacity (percentage-based)
             current_exposure = await self.position_tracker.get_total_exposure()
-            if current_exposure >= self.spread_config.max_total_exposure_usd:
+            max_exposure = self.calculate_max_exposure()
+            if current_exposure >= max_exposure:
                 continue
 
             positions = await self.position_tracker.get_all_positions()
@@ -455,15 +507,22 @@ class SpreadCaptureStrategy(BaseStrategy):
             f"Bid: ${opp.bid:.3f} | Ask: ${opp.ask:.3f} | Spread: {opp.spread_pct:.1f}%"
         )
 
-        # Determine position size
-        size = min(
-            self.spread_config.max_position_usd,
-            self.spread_config.max_total_exposure_usd - await self.position_tracker.get_total_exposure(),
-        )
+        # Determine position size (percentage-based for compounding)
+        position_size = self.calculate_position_size()
+        current_exposure = await self.position_tracker.get_total_exposure()
+        max_exposure = self.calculate_max_exposure()
+        available_exposure = max_exposure - current_exposure
 
-        if size < 5:  # Minimum viable position
+        size = min(position_size, available_exposure)
+
+        if size < 1:  # Minimum viable position
             logger.debug(f"Position size too small: ${size:.2f}")
             return
+
+        logger.info(
+            f"[SpreadCapture] Position sizing: ${size:.2f} "
+            f"({self.spread_config.position_size_pct*100:.0f}% of ${self.current_bankroll:.2f} bankroll)"
+        )
 
         # Place limit buy at bid price
         order_id = await self.order_manager.place_buy(

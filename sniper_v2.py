@@ -53,6 +53,7 @@ from config import (
     SPREAD_MIN_SPREAD_PCT, SPREAD_MAX_SPREAD_PCT, SPREAD_MIN_LIQUIDITY_USD,
     SPREAD_EXIT_TARGET_PCT, SPREAD_STOP_LOSS_PCT, SPREAD_MAX_HOLD_SEC,
     SPREAD_EXIT_BEFORE_EXPIRY_SEC, SPREAD_NO_ENTRY_BEFORE_EXPIRY_SEC,
+    SPREAD_POSITION_SIZE_PCT, SPREAD_MAX_EXPOSURE_PCT,
     SPREAD_MAX_POSITION_USD, SPREAD_MAX_CONCURRENT_POSITIONS, SPREAD_MAX_TOTAL_EXPOSURE_USD,
     SPREAD_ENABLE_ARBITRAGE, SPREAD_MAX_ARBITRAGE_COST, SPREAD_SCAN_INTERVAL_SEC,
 )
@@ -964,7 +965,7 @@ async def run_spread_capture(bot_config, args):
         stale_order_seconds=300,
     )
 
-    # Create spread capture config from environment
+    # Create spread capture config from environment (percentage-based sizing)
     spread_config = SpreadCaptureConfig(
         min_spread_pct=SPREAD_MIN_SPREAD_PCT,
         max_spread_pct=SPREAD_MAX_SPREAD_PCT,
@@ -974,8 +975,12 @@ async def run_spread_capture(bot_config, args):
         max_hold_seconds=SPREAD_MAX_HOLD_SEC,
         exit_before_expiry_seconds=SPREAD_EXIT_BEFORE_EXPIRY_SEC,
         no_entry_before_expiry_seconds=SPREAD_NO_ENTRY_BEFORE_EXPIRY_SEC,
-        max_position_usd=SPREAD_MAX_POSITION_USD,
+        # Percentage-based position sizing for compounding
+        position_size_pct=SPREAD_POSITION_SIZE_PCT,
+        max_exposure_pct=SPREAD_MAX_EXPOSURE_PCT,
         max_concurrent_positions=SPREAD_MAX_CONCURRENT_POSITIONS,
+        # Safety caps (0 = no cap)
+        max_position_usd=SPREAD_MAX_POSITION_USD,
         max_total_exposure_usd=SPREAD_MAX_TOTAL_EXPOSURE_USD,
         enable_arbitrage=SPREAD_ENABLE_ARBITRAGE,
         max_arbitrage_cost=SPREAD_MAX_ARBITRAGE_COST,

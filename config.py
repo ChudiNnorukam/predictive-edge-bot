@@ -160,10 +160,13 @@ SPREAD_MAX_HOLD_SEC = int(os.getenv("SPREAD_MAX_HOLD_SEC", "600"))  # 10 min max
 SPREAD_EXIT_BEFORE_EXPIRY_SEC = int(os.getenv("SPREAD_EXIT_BEFORE_EXPIRY_SEC", "60"))  # Exit 60s before
 SPREAD_NO_ENTRY_BEFORE_EXPIRY_SEC = int(os.getenv("SPREAD_NO_ENTRY_BEFORE_EXPIRY_SEC", "120"))  # No entry in final 2 min
 
-# Position sizing
-SPREAD_MAX_POSITION_USD = float(os.getenv("SPREAD_MAX_POSITION_USD", "50.0"))  # Max per position
+# Position sizing (percentage-based for compounding)
+SPREAD_POSITION_SIZE_PCT = float(os.getenv("SPREAD_POSITION_SIZE_PCT", "0.25"))  # 25% of bankroll per position
+SPREAD_MAX_EXPOSURE_PCT = float(os.getenv("SPREAD_MAX_EXPOSURE_PCT", "0.75"))  # 75% max total exposure
 SPREAD_MAX_CONCURRENT_POSITIONS = int(os.getenv("SPREAD_MAX_CONCURRENT_POSITIONS", "5"))  # Max positions
-SPREAD_MAX_TOTAL_EXPOSURE_USD = float(os.getenv("SPREAD_MAX_TOTAL_EXPOSURE_USD", "250.0"))  # Total exposure
+# Fixed limits as safety caps (optional, 0 = no cap)
+SPREAD_MAX_POSITION_USD = float(os.getenv("SPREAD_MAX_POSITION_USD", "0"))  # Hard cap per position (0=unlimited)
+SPREAD_MAX_TOTAL_EXPOSURE_USD = float(os.getenv("SPREAD_MAX_TOTAL_EXPOSURE_USD", "0"))  # Hard cap total (0=unlimited)
 
 # Arbitrage mode (buy both YES and NO when combined < $1)
 SPREAD_ENABLE_ARBITRAGE = os.getenv("SPREAD_ENABLE_ARBITRAGE", "True").lower() in ("true", "1", "yes")
