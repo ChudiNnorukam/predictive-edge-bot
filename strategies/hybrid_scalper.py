@@ -79,7 +79,7 @@ class HybridScalperConfig:
     # Timing
     timeout_seconds: int = 600          # 10 min max hold (longer than v3)
     scan_interval_sec: float = 1.0
-    min_time_to_expiry_sec: int = 120
+    min_time_to_expiry_sec: int = 30  # Lowered to catch near-expiry extremes like distinct-baguette
 
     # Assets
     supported_assets: List[str] = field(
