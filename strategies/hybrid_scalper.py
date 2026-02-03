@@ -38,6 +38,13 @@ try:
 except ImportError:
     RAG_AVAILABLE = False
 
+# Notifications
+try:
+    from utils.notifications import Notifier
+    NOTIFIER_AVAILABLE = True
+except ImportError:
+    NOTIFIER_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # Trade journal directory
@@ -234,6 +241,10 @@ class HybridScalper(BaseStrategy):
         self.veto_rules: Dict[str, Dict] = {}  # tag combo -> veto rule data
         self._rag_initialized = False
 
+        # Notifications for veto alerts
+        self.notifier: Optional[Any] = None
+        self._veto_alert_count = 0  # Track vetoes this session
+
         hold_mode = "HOLD TO EXPIRY" if self.scalper_config.hold_to_expiry else f"+{self.scalper_config.profit_target_cents*100:.0f}¢/-{self.scalper_config.stop_loss_cents*100:.0f}¢"
         logger.info(
             f"HybridScalper v4 initialized | "
@@ -249,6 +260,18 @@ class HybridScalper(BaseStrategy):
 
         # Initialize RAG learning system
         await self._initialize_rag()
+
+        # Initialize notifier for veto alerts
+        if NOTIFIER_AVAILABLE:
+            try:
+                from config import config
+                self.notifier = Notifier(
+                    telegram_token=getattr(config, 'telegram_token', None),
+                    telegram_chat=getattr(config, 'telegram_chat_id', None),
+                    discord_webhook=getattr(config, 'discord_webhook_url', None),
+                )
+            except Exception as e:
+                logger.debug(f"Notifier not configured: {e}")
 
         headers = {
             "Accept-Encoding": "gzip, deflate",
@@ -276,6 +299,9 @@ class HybridScalper(BaseStrategy):
 
                     # 6. Log status periodically
                     await self._log_status()
+
+                    # 7. Send veto alerts if needed
+                    await self._send_veto_alert_if_needed()
 
                     await asyncio.sleep(self.scalper_config.scan_interval_sec)
 
@@ -707,14 +733,28 @@ class HybridScalper(BaseStrategy):
 
         if tags_str in self.veto_rules:
             rule = self.veto_rules[tags_str]
+            self._veto_alert_count += 1
             logger.warning(
                 f"🚫 VETO: {market.asset} {side} blocked | "
                 f"Pattern: {tags_str} | Loss rate: {rule['loss_rate']*100:.0f}% "
-                f"({rule['count']} occurrences)"
+                f"({rule['count']} occurrences) | Session vetoes: {self._veto_alert_count}"
             )
             return True
 
         return False
+
+    async def _send_veto_alert_if_needed(self):
+        """Send alert if significant number of vetoes occurred (called periodically)"""
+        if not self.notifier or self._veto_alert_count == 0:
+            return
+
+        # Alert every 10 vetoes
+        if self._veto_alert_count % 10 == 0:
+            await self.notifier.notify(
+                f"🚫 Veto Summary: {self._veto_alert_count} entries blocked this session\n"
+                f"Active veto rules: {len(self.veto_rules)}",
+                title="RAG Veto Alert"
+            )
 
     def _should_buy_up(self, market: MarketPair) -> bool:
         """
